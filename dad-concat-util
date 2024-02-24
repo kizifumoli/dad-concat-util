@@ -1,0 +1,113 @@
+#!/usr/bin/env python3
+
+# dad-util: Very basic script to concatenate a set of images in a directory in
+# the shape of a user-supplied grid.
+
+import re
+import argparse
+import subprocess
+import tempfile
+from pathlib import Path
+from datetime import datetime as dt
+from typing import Optional, List
+
+
+class ImageMagickWrapper:
+    @staticmethod
+    def concat_horizontally(files: List[Path], output: Path):
+        """Concatenates a list of files horizontally using imagemagick's convert utility"""
+        command = [
+            "convert",
+            "+append",
+            "-background", "none",
+            *files,
+            f"{output}"
+        ]
+        subprocess.run(command)
+
+    @staticmethod
+    def concat_vertically(files: List[Path], output: Path):
+        """Concatenates a list of files vertically using imagemagick's convert utility"""
+        command = [
+            "convert",
+            "-append",
+            "-background", "none",
+            *files,
+            f"{output}"
+        ]
+        subprocess.run(command)
+
+
+def generate_grid_rows(n_rows, file_list: List[Path]) -> List[List[Path]]:
+    """Given n_rows and n_cols, it converts a file list into a list of lists, where
+each list represents a row in the final grid"""
+    n_cols = int(len(file_list) / n_rows) # Truncate division
+
+    # If n_cols * n_rows != len(file_list), then add 1 to cols to increase
+    # width of grid and ensure everything can fit
+    if (n_cols * n_rows) != len(file_list):
+        n_cols += 1
+
+    # Source: https://stackoverflow.com/a/1624988
+    return [file_list[i: i+n_cols] for i in range(0, len(file_list), n_cols)]
+
+
+# Source: https://stackoverflow.com/questions/5967500/how-to-correctly-sort-a-string-with-a-number-inside
+def atoi(text):
+    return int(text) if text.isdigit() else text
+
+def natural_keys(text):
+    '''
+    alist.sort(key=natural_keys) sorts in human order
+    http://nedbatchelder.com/blog/200712/human_sorting.html
+    (See Toothy's implementation in the comments)
+    '''
+    return [ atoi(c) for c in re.split(r'(\d+)', text) ]
+
+
+def concat_images(input_dir: Path, n_rows: int, output_dir: Path):
+    today_str = dt.now().strftime("%Y.%m.%d")
+    input_files = sorted(input_dir.glob("*"))
+
+    if len(input_files) == 0:
+        raise ValueError("Input Directory must not be empty!")
+
+    grid_rows = generate_grid_rows(n_rows, input_files)
+    # Create temporary directory to store intermediate files.
+    with tempfile.TemporaryDirectory() as tmp_outputdir:
+        row_files = []
+        row_num = 1
+        for row in grid_rows:
+            output_row_path = Path(tmp_outputdir) / f"row{row_num}.jpg"
+            print(f"Outputting row {row_num} to {output_row_path}")
+            ImageMagickWrapper.concat_horizontally(row, output_row_path)
+
+            row_num += 1
+            row_files += [output_row_path]
+
+        # Now, finish by joining all the rows vertically
+        ImageMagickWrapper.concat_vertically(row_files, f"{output_dir / today_str}.jpg")
+
+
+    print(f"Output: {output_dir / today_str}.jpg")
+
+
+def create_argparser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--input-dir", type=Path, help="Directory with your DAD submission photos",
+                        required=True)
+    parser.add_argument("--n-rows", type=int, default=1, help="How many rows in the resulting grid (Default: 1 row)")
+    parser.add_argument("--output-dir", type=Path, help="Directory where the output image will be written to",
+                        default=Path.home())
+
+    parser.set_defaults(func=lambda args: concat_images(args.input_dir, args.n_rows, args.output_dir))
+
+    return parser
+
+def main():
+    parser = create_argparser()
+    args = parser.parse_args()
+    args.func(args)
+
+if __name__ == "__main__":
+    main()

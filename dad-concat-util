@@ -15,9 +15,18 @@ from datetime import datetime as dt
 from typing import Optional, List
 
 class GridOptions:
-    def __init__(self, resize_heights: bool, resize_widths: bool):
+    def __init__(self, resize_heights: bool, resize_widths: bool, center_horiz: bool, center_vert: bool):
+        # (If True) Resizing heights happens when forming a row
         self.resize_heights = resize_heights
+
+        # (If True) Resizing widths happens when joining rows
         self.resize_widths = resize_widths
+
+        # (If True) Centering horizontally occurs when joining rows
+        self.center_horizontally = center_horiz
+
+        # (If True) Centering vertically occurs when forming a row
+        self.center_vertically = center_vert
 
 class AppendDirection(enum.Enum):
     HORIZONTAL = 1
@@ -39,12 +48,22 @@ class ImageMagickWrapper:
         return (int(regex_result[1]), int(regex_result[2]))
 
     @staticmethod
-    def __run_concat_command(files: List[Path], output: Path, append_dir: AppendDirection):
+    def __run_concat_command(files: List[Path],
+                             output: Path,
+                             append_dir: AppendDirection,
+                             options: GridOptions):
         append_dir_str = "+" if (append_dir == AppendDirection.HORIZONTAL) else "-"
+
+        center_args = []
+        if ((append_dir == AppendDirection.VERTICAL and options.center_horizontally and (not options.resize_widths)) or
+            (append_dir == AppendDirection.HORIZONTAL and options.center_vertically and (not options.resize_heights))):
+            center_args = ["-gravity", "center"]
+
         concat_command = [
             "convert",
             f"{append_dir_str}append",
             "-background", "none",
+            *center_args,
             *files,
             f"{output}"
         ]
@@ -93,7 +112,7 @@ class ImageMagickWrapper:
         """Concatenates a list of files horizontally using imagemagick's convert utility"""
         append_dir =  AppendDirection.HORIZONTAL
         if not options.resize_heights:
-            ImageMagickWrapper.__run_concat_command(files, output, append_dir)
+            ImageMagickWrapper.__run_concat_command(files, output, append_dir, options)
             return
 
         # If the user is okay with resizing the heights, create temporary files
@@ -101,7 +120,7 @@ class ImageMagickWrapper:
         concat_files = []
         with tempfile.TemporaryDirectory() as resize_dir:
             concat_files = ImageMagickWrapper.bulk_resize(files, resize_dir, append_dir)
-            ImageMagickWrapper.__run_concat_command(concat_files, output, append_dir)
+            ImageMagickWrapper.__run_concat_command(concat_files, output, append_dir, options)
 
 
 
@@ -110,7 +129,7 @@ class ImageMagickWrapper:
         """Concatenates a list of files vertically using imagemagick's convert utility"""
         append_dir =  AppendDirection.VERTICAL
         if not options.resize_widths:
-            ImageMagickWrapper.__run_concat_command(files, output, append_dir)
+            ImageMagickWrapper.__run_concat_command(files, output, append_dir, options)
             return
 
         # If the user is okay with resizing the heights, create temporary files
@@ -118,7 +137,7 @@ class ImageMagickWrapper:
         concat_files = []
         with tempfile.TemporaryDirectory() as resize_dir:
             concat_files = ImageMagickWrapper.bulk_resize(files, resize_dir, append_dir)
-            ImageMagickWrapper.__run_concat_command(concat_files, output, append_dir)
+            ImageMagickWrapper.__run_concat_command(concat_files, output, append_dir, options)
 
 
 def generate_grid_rows(n_rows, file_list: List[Path]) -> List[List[Path]]:
@@ -182,9 +201,11 @@ def create_argparser() -> argparse.ArgumentParser:
                         default=Path.home())
     parser.add_argument("--resize-heights", default=True, action=argparse.BooleanOptionalAction, help="When TRUE, files in a row will be scaled up to all have the same height")
     parser.add_argument("--resize-widths", default=True, action=argparse.BooleanOptionalAction, help="When TRUE, rows will be scaled up to all have the same width")
+    parser.add_argument("--center-horizontally", default=True, action=argparse.BooleanOptionalAction, help="When TRUE, Images are centered horizontally when --no-resize-widths is specified")
+    parser.add_argument("--center-vertically", default=True, action=argparse.BooleanOptionalAction, help="When TRUE, Images are centered vertically when --no-resize-heights is specified")
 
     parser.set_defaults(func=lambda args: concat_images(args.input_dir, args.n_rows, args.output_dir,
-                                                        GridOptions(args.resize_heights, args.resize_widths)))
+                                                        GridOptions(args.resize_heights, args.resize_widths, args.center_horizontally, args.center_vertically)))
     return parser
 
 def main():

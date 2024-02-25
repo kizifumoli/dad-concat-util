@@ -7,35 +7,118 @@ import re
 import argparse
 import subprocess
 import tempfile
+import enum
+
+from functools import reduce
 from pathlib import Path
 from datetime import datetime as dt
 from typing import Optional, List
 
+class GridOptions:
+    def __init__(self, resize_heights: bool, resize_widths: bool):
+        self.resize_heights = resize_heights
+        self.resize_widths = resize_widths
+
+class AppendDirection(enum.Enum):
+    HORIZONTAL = 1
+    VERTICAL = 2
+
 
 class ImageMagickWrapper:
     @staticmethod
-    def concat_horizontally(files: List[Path], output: Path):
-        """Concatenates a list of files horizontally using imagemagick's convert utility"""
-        command = [
-            "convert",
-            "+append",
-            "-background", "none",
-            *files,
-            f"{output}"
-        ]
-        subprocess.run(command)
+    def get_dimensions(image_path: Path) -> (int, int):
+        result = subprocess.run(["identify", "-format", '"%[width]x%[height]"', f"{image_path}"],
+                                capture_output=True)
+        dimension_str = str(result.stdout.decode("utf-8")).strip().replace('"', '')
+
+        dimension_regex = re.compile(r"(\d+)x(\d+).*?")
+        regex_result = dimension_regex.match(dimension_str)
+        if regex_result is None:
+            raise ValueError(f"Unable to find the width and height on string: {dimension_str}")
+
+        return (int(regex_result[1]), int(regex_result[2]))
 
     @staticmethod
-    def concat_vertically(files: List[Path], output: Path):
-        """Concatenates a list of files vertically using imagemagick's convert utility"""
-        command = [
+    def __run_concat_command(files: List[Path], output: Path, append_dir: AppendDirection):
+        append_dir_str = "+" if (append_dir == AppendDirection.HORIZONTAL) else "-"
+        concat_command = [
             "convert",
-            "-append",
+            f"{append_dir_str}append",
             "-background", "none",
             *files,
             f"{output}"
         ]
-        subprocess.run(command)
+
+        result = subprocess.run(concat_command)
+        if result.returncode != 0:
+            raise ValueError("Non-zero exit code on horizontal concatenation ")
+
+
+    @staticmethod
+    def bulk_resize(input_files: List[Path], output_dir: Path, append_dir: AppendDirection):
+        # Get all the dimensions for the images, then use the largest
+        # height to ensure they're all correctly resized in a row.
+        dimensions = [ImageMagickWrapper.get_dimensions(image_path) for image_path in input_files]
+
+        largest_dims = reduce(lambda lhs, rhs: (max(lhs[0], rhs[0]), max(lhs[1], rhs[1])),
+                              dimensions)
+
+        concat_files = []
+        for filenum, input_file in enumerate(input_files):
+            if append_dir == AppendDirection.HORIZONTAL:
+                # Use height if we're appending horizontally (scale up if wide, but not tall)
+                geometry_str = f"x{largest_dims[1]}"
+            else:
+                # Use width if we're appending vertically (scale up if tall, but not wide enough)
+                geometry_str = f"{largest_dims[0]}"
+            output_filepath = Path(output_dir) / f"{filenum}{input_file.suffix}"
+            resize_cmd = [
+                "convert",
+                "-geometry",
+                geometry_str,
+                f"{input_file}",
+                f"{output_filepath}"
+            ]
+
+            result = subprocess.run(resize_cmd)
+            if result.returncode != 0:
+                raise ValueError("Non-zero exit code on horizontal concatenation ")
+
+            concat_files += [output_filepath]
+        return concat_files
+
+
+    @staticmethod
+    def concat_horizontally(files: List[Path], output: Path, options: GridOptions):
+        """Concatenates a list of files horizontally using imagemagick's convert utility"""
+        append_dir =  AppendDirection.HORIZONTAL
+        if not options.resize_heights:
+            ImageMagickWrapper.__run_concat_command(files, output, append_dir)
+            return
+
+        # If the user is okay with resizing the heights, create temporary files
+        # by scaling up each image based on the largest one
+        concat_files = []
+        with tempfile.TemporaryDirectory() as resize_dir:
+            concat_files = ImageMagickWrapper.bulk_resize(files, resize_dir, append_dir)
+            ImageMagickWrapper.__run_concat_command(concat_files, output, append_dir)
+
+
+
+    @staticmethod
+    def concat_vertically(files: List[Path], output: Path, options):
+        """Concatenates a list of files vertically using imagemagick's convert utility"""
+        append_dir =  AppendDirection.VERTICAL
+        if not options.resize_widths:
+            ImageMagickWrapper.__run_concat_command(files, output, append_dir)
+            return
+
+        # If the user is okay with resizing the heights, create temporary files
+        # by scaling up each image based on the largest one
+        concat_files = []
+        with tempfile.TemporaryDirectory() as resize_dir:
+            concat_files = ImageMagickWrapper.bulk_resize(files, resize_dir, append_dir)
+            ImageMagickWrapper.__run_concat_command(concat_files, output, append_dir)
 
 
 def generate_grid_rows(n_rows, file_list: List[Path]) -> List[List[Path]]:
@@ -65,7 +148,7 @@ def natural_keys(text):
     return [ atoi(c) for c in re.split(r'(\d+)', text) ]
 
 
-def concat_images(input_dir: Path, n_rows: int, output_dir: Path):
+def concat_images(input_dir: Path, n_rows: int, output_dir: Path, options: GridOptions):
     today_str = dt.now().strftime("%Y.%m.%d")
     input_files = sorted(input_dir.glob("*"))
 
@@ -79,15 +162,13 @@ def concat_images(input_dir: Path, n_rows: int, output_dir: Path):
         row_num = 1
         for row in grid_rows:
             output_row_path = Path(tmp_outputdir) / f"row{row_num}.jpg"
-            print(f"Outputting row {row_num} to {output_row_path}")
-            ImageMagickWrapper.concat_horizontally(row, output_row_path)
+            ImageMagickWrapper.concat_horizontally(row, output_row_path, options)
 
             row_num += 1
             row_files += [output_row_path]
 
         # Now, finish by joining all the rows vertically
-        ImageMagickWrapper.concat_vertically(row_files, f"{output_dir / today_str}.jpg")
-
+        ImageMagickWrapper.concat_vertically(row_files, f"{output_dir / today_str}.jpg", options)
 
     print(f"Output: {output_dir / today_str}.jpg")
 
@@ -99,9 +180,11 @@ def create_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--n-rows", type=int, default=1, help="How many rows in the resulting grid (Default: 1 row)")
     parser.add_argument("--output-dir", type=Path, help="Directory where the output image will be written to",
                         default=Path.home())
+    parser.add_argument("--resize-heights", default=True, action=argparse.BooleanOptionalAction, help="When TRUE, files in a row will be scaled up to all have the same height")
+    parser.add_argument("--resize-widths", default=True, action=argparse.BooleanOptionalAction, help="When TRUE, rows will be scaled up to all have the same width")
 
-    parser.set_defaults(func=lambda args: concat_images(args.input_dir, args.n_rows, args.output_dir))
-
+    parser.set_defaults(func=lambda args: concat_images(args.input_dir, args.n_rows, args.output_dir,
+                                                        GridOptions(args.resize_heights, args.resize_widths)))
     return parser
 
 def main():
